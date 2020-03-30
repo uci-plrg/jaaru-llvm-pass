@@ -34,6 +34,7 @@
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/Pass.h"
 #include "llvm/ProfileData/InstrProf.h"
 #include "llvm/Support/raw_ostream.h"
@@ -44,13 +45,20 @@
 #include "llvm/Transforms/Utils/EscapeEnumerator.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include <vector>
-
 using namespace llvm;
 
 #define DEBUG_TYPE "PMC"
 #include <llvm/IR/DebugLoc.h>
 
 //#define ENABLEATOMIC
+
+enum NVMOP {
+	NVM_CLWB,
+	NVM_FENCE,
+	NVM_UNKNOWN
+};
+
+typedef enum NVMOP NVMOP;
 
 Value *getPosition( Instruction * I, IRBuilder <> &IRB, bool print = false)
 {
@@ -162,7 +170,9 @@ static Function * checkPMCPassInterfaceFunction(Value *FuncOrBitcast) {
 	report_fatal_error(Err);
 }
 
+
 namespace {
+
 	struct PMCPass : public FunctionPass {
 		PMCPass() : FunctionPass(ID) {}
 		StringRef getPassName() const override;
@@ -171,11 +181,14 @@ namespace {
 		static char ID;
 
 	private:
+		void instrumentFence(Instruction *I, const DataLayout &DL);
+		bool instrumentCacheWriteBack(Instruction *I, const DataLayout &DL);
 		void initializeCallbacks(Module &M);
 		bool instrumentLoadOrStore(Instruction *I, const DataLayout &DL);
-		//bool instrumentVolatile(Instruction *I, const DataLayout &DL);
 		bool instrumentMemIntrinsic(Instruction *I);
+		NVMOP whichNVMoperation(Instruction *I);
 #ifdef ENABLEATOMIC
+		bool instrumentVolatile(Instruction *I, const DataLayout &DL);
 		bool isAtomicCall(Instruction *I);
 		bool instrumentAtomic(Instruction *I, const DataLayout &DL);
 		bool instrumentAtomicCall(CallInst *CI, const DataLayout &DL);
@@ -192,8 +205,8 @@ namespace {
 
 		Function * PMCLoad[kNumberOfAccessSizes];
 		Function * PMCStore[kNumberOfAccessSizes];
-		//Function * PMCVolatileLoad[kNumberOfAccessSizes];
-		//Function * PMCVolatileStore[kNumberOfAccessSizes];
+		Function * PMCVolatileLoad[kNumberOfAccessSizes];
+		Function * PMCVolatileStore[kNumberOfAccessSizes];
 #ifdef ENABLEATOMIC
 		Function * PMCAtomicInit[kNumberOfAccessSizes];
 		Function * PMCAtomicLoad[kNumberOfAccessSizes];
@@ -203,18 +216,38 @@ namespace {
 		Function * PMCAtomicCAS_V2[kNumberOfAccessSizes];
 		Function * PMCAtomicThreadFence;
 #endif
-		Function * MemmoveFn, * MemcpyFn, * MemsetFn;
+		Function * MemmoveFn, * MemcpyFn, * MemsetFn, *CacheFn, *FenceFn;
 		// Function * CDSCtorFunction;
 #ifdef ENABLEATOMIC
 		std::vector<StringRef> AtomicFuncNames;
 #endif
 		std::vector<StringRef> PartialAtomicFuncNames;
-		std::vector<StringRef> PersistentMemoryOperations;
+		std::vector<StringRef> CacheOperationsNames;
+		std::vector<StringRef> FenceOperationsNames;
 	};
+
 }
 
 StringRef PMCPass::getPassName() const {
 	return "PMCPass";
+}
+
+NVMOP PMCPass::whichNVMoperation(Instruction *I){
+	if(CallInst* callInst = dyn_cast<CallInst>(I)) {
+		if(callInst->isInlineAsm()){
+			InlineAsm *asmInline = dyn_cast<InlineAsm>(callInst->getCalledOperand());
+			StringRef asmStr = asmInline->getAsmString();
+			for( StringRef op : FenceOperationsNames){
+				if(asmStr.contains(op))
+					return NVM_FENCE;
+			}
+			for( StringRef op : CacheOperationsNames){
+				if(asmStr.contains(op))
+					return NVM_CLWB;
+			}
+		}
+	}
+	return NVM_UNKNOWN;
 }
 
 void PMCPass::initializeCallbacks(Module &M) {
@@ -257,9 +290,10 @@ void PMCPass::initializeCallbacks(Module &M) {
 		// void cds_atomic_store8 (void * obj, int atomic_index, uint8_t val)
 		SmallString<32> LoadName("pmc_load" + BitSizeStr);
 		SmallString<32> StoreName("pmc_store" + BitSizeStr);
-		//SmallString<32> VolatileLoadName("pmc_volatile_load" + BitSizeStr);
-		//SmallString<32> VolatileStoreName("pmc_volatile_store" + BitSizeStr);
+		
 #ifdef ENABLEATOMIC
+		SmallString<32> VolatileLoadName("pmc_volatile_load" + BitSizeStr);
+		SmallString<32> VolatileStoreName("pmc_volatile_store" + BitSizeStr);
 		SmallString<32> AtomicInitName("pmc_atomic_init" + BitSizeStr);
 		SmallString<32> AtomicLoadName("pmc_atomic_load" + BitSizeStr);
 		SmallString<32> AtomicStoreName("pmc_atomic_store" + BitSizeStr);
@@ -268,15 +302,15 @@ void PMCPass::initializeCallbacks(Module &M) {
 							M.getOrInsertFunction(LoadName, Attr, VoidTy, PtrTy).getCallee());
 		PMCStore[i] = checkPMCPassInterfaceFunction(
 							M.getOrInsertFunction(StoreName, Attr, VoidTy, PtrTy).getCallee());
-		/*
+		
+#ifdef ENABLEATOMIC		
 		PMCVolatileLoad[i]  = checkPMCPassInterfaceFunction(
 								M.getOrInsertFunction(VolatileLoadName,
 								Attr, Ty, PtrTy, Int8PtrTy).getCallee());
 		PMCVolatileStore[i] = checkPMCPassInterfaceFunction(
 								M.getOrInsertFunction(VolatileStoreName, 
 								Attr, VoidTy, PtrTy, Ty, Int8PtrTy).getCallee());
-		*/
-#ifdef ENABLEATOMIC		
+		
 		PMCAtomicInit[i] = checkPMCPassInterfaceFunction(
 							M.getOrInsertFunction(AtomicInitName, 
 							Attr, VoidTy, PtrTy, Ty, Int8PtrTy).getCallee());
@@ -338,7 +372,8 @@ void PMCPass::initializeCallbacks(Module &M) {
 	MemsetFn = checkPMCPassInterfaceFunction(
 					M.getOrInsertFunction("memset", Attr, Int8PtrTy, Int8PtrTy,
 					Int32Ty, IntPtrTy).getCallee());
-	
+	CacheFn  = checkPMCPassInterfaceFunction(M.getOrInsertFunction("pmc_clwb", Attr, VoidTy, Int8PtrTy).getCallee());
+	FenceFn  = checkPMCPassInterfaceFunction(M.getOrInsertFunction("pmc_mfence", Attr, VoidTy).getCallee());
 }
 
 bool PMCPass::doInitialization(Module &M) {
@@ -367,11 +402,16 @@ bool PMCPass::doInitialization(Module &M) {
 		, "fetch", "exchange", "compare_exchange_"
 #endif
 	};
-	PersistentMemoryOperations =
+	
+	CacheOperationsNames =
 	{
 		"clflush", "xsaveopt", "mfence"
 	};
 
+	FenceOperationsNames = 
+	{
+		"mfence"
+	};
 	return true;
 }
 
@@ -516,9 +556,11 @@ void CDSPass::InsertRuntimeIgnores(Function &F) {
 bool PMCPass::runOnFunction(Function &F) {
 	initializeCallbacks( *F.getParent() );
 	SmallVector<Instruction*, 8> AllLoadsAndStores;
+	SmallVector<Instruction*, 8> FenceOperations;
+	SmallVector<Instruction*, 8> CacheOperations;
 	SmallVector<Instruction*, 8> LocalLoadsAndStores;
-	//SmallVector<Instruction*, 8> VolatileLoadsAndStores;
 #ifdef ENABLEATOMIC
+	SmallVector<Instruction*, 8> VolatileLoadsAndStores;
 	SmallVector<Instruction*, 8> AtomicAccesses;
 #endif
 	SmallVector<Instruction*, 8> MemIntrinCalls;
@@ -552,7 +594,9 @@ bool PMCPass::runOnFunction(Function &F) {
 				bool isVolatile = ( LI ? LI->isVolatile() : SI->isVolatile() );
 
 				if (isVolatile) {
-					//VolatileLoadsAndStores.push_back(&Inst);
+#ifdef ENABLEATOMIC
+					VolatileLoadsAndStores.push_back(&Inst);
+#endif
 					HasVolatile = true;
 				} else
 					LocalLoadsAndStores.push_back(&Inst);
@@ -560,7 +604,12 @@ bool PMCPass::runOnFunction(Function &F) {
 				if (isa<MemIntrinsic>(Inst))
 					MemIntrinCalls.push_back(&Inst);
 				else{
-					errs() << "TODO: Call instruction that isn't for memory ==>" << Inst << "\n";
+					NVMOP op = whichNVMoperation(&Inst);
+					if(op == NVM_FENCE){
+						FenceOperations.push_back(&Inst);
+					} else if (op == NVM_CLWB) {
+						CacheOperations.push_back(&Inst);
+					}
 				}
 				/*if (CallInst *CI = dyn_cast<CallInst>(&Inst))
 					maybeMarkSanitizerLibraryCallNoBuiltin(CI, TLI);
@@ -577,11 +626,11 @@ bool PMCPass::runOnFunction(Function &F) {
 	for (auto Inst : AllLoadsAndStores) {
 		Res |= instrumentLoadOrStore(Inst, DL);
 	}
-	/*	
+
+#ifdef ENABLEATOMIC 	
 	for (auto Inst : VolatileLoadsAndStores) {
 		Res |= instrumentVolatile(Inst, DL);
-	}*/
-#ifdef ENABLEATOMIC 
+	}
 	for (auto Inst : AtomicAccesses) {
 		Res |= instrumentAtomic(Inst, DL);
 	}
@@ -589,6 +638,14 @@ bool PMCPass::runOnFunction(Function &F) {
 	
 	for (auto Inst : MemIntrinCalls) {
 		Res |= instrumentMemIntrinsic(Inst);
+	}
+
+	for (auto Inst : CacheOperations) {
+		assert(instrumentCacheWriteBack(Inst, DL));
+	}
+
+	for (auto Inst : FenceOperations) {
+		instrumentFence(Inst, DL);
 	}
 	
 	// Only instrument functions that contain atomics or volatiles
@@ -615,8 +672,47 @@ bool PMCPass::runOnFunction(Function &F) {
 	return false;
 }
 
-bool PMCPass::instrumentLoadOrStore(Instruction *I,
-									const DataLayout &DL) {
+bool PMCPass::instrumentCacheWriteBack( Instruction *I, const DataLayout &DL){
+	IRBuilder<> IRB(I);
+	assert(isa<CallInst>(I));
+	CallInst * CI = dyn_cast<CallInst>(I);
+        std::vector<Value *> parameters;
+
+        User::op_iterator begin = CI->arg_begin();
+	User::op_iterator end = CI->arg_end();
+        for (User::op_iterator it = begin; it != end; ++it) {
+                Value *param = *it;
+		errs() << *param << "\n";
+                parameters.push_back(param);
+        }
+	if(parameters.size() != 2){
+		return false;
+	}
+	Value *Addr = parameters[0];
+
+
+	if(Addr->isSwiftError()){
+		return false;
+	}
+	int Idx = getMemoryAccessFuncIndex(Addr, DL);
+	if (Idx < 0)
+		return false;
+
+	Type *ArgType = IRB.CreatePointerCast(Addr, Addr->getType())->getType();
+	if ( ArgType != Int8PtrTy ) {
+                return false;
+        }
+	IRB.CreateCall(CacheFn, IRB.CreatePointerCast(Addr, Addr->getType()));
+	return true;
+}
+
+void PMCPass::instrumentFence(Instruction *I, const DataLayout &DL){
+	IRBuilder<> IRB(I);
+	IRB.CreateCall(FenceFn);
+}
+
+
+bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 	IRBuilder<> IRB(I);
 	bool IsWrite = isa<StoreInst>(*I);
 	Value *Addr = IsWrite
@@ -681,7 +777,8 @@ bool PMCPass::instrumentLoadOrStore(Instruction *I,
 	else         NumInstrumentedReads++;
 	return true;
 }
-/*
+
+#ifdef ENABLEATOMIC
 bool PMCPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
 	IRBuilder<> IRB(I);
 	Value *position = getPosition(I, IRB);
@@ -713,7 +810,7 @@ bool PMCPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
 
 	return true;
 }
-*/
+#endif
 
 bool PMCPass::instrumentMemIntrinsic(Instruction *I) {
 	IRBuilder<> IRB(I);
@@ -833,6 +930,8 @@ bool PMCPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 	}
 	return true;
 }
+
+
 
 bool PMCPass::isAtomicCall(Instruction *I) {
 	if ( auto *CI = dyn_cast<CallInst>(I) ) {
