@@ -50,7 +50,7 @@ using namespace llvm;
 #define DEBUG_TYPE "PMC"
 #include <llvm/IR/DebugLoc.h>
 
-//#define ENABLEATOMIC
+#define ENABLEATOMIC
 
 enum NVMOP {
 	NVM_CLWB,
@@ -181,12 +181,13 @@ namespace {
 		static char ID;
 
 	private:
-		void instrumentFence(Instruction *I, const DataLayout &DL);
-		bool instrumentCacheWriteBack(Instruction *I, const DataLayout &DL);
+		void instrumentFenceOp(Instruction *I, const DataLayout &DL);
+		bool instrumentCacheOp(Instruction *I, const DataLayout &DL);
 		void initializeCallbacks(Module &M);
 		bool instrumentLoadOrStore(Instruction *I, const DataLayout &DL);
 		bool instrumentMemIntrinsic(Instruction *I);
 		NVMOP whichNVMoperation(Instruction *I);
+		Function * whichNVMFunction(Instruction *I);
 #ifdef ENABLEATOMIC
 		bool instrumentVolatile(Instruction *I, const DataLayout &DL);
 		bool isAtomicCall(Instruction *I);
@@ -216,8 +217,9 @@ namespace {
 		Function * PMCAtomicCAS_V2[kNumberOfAccessSizes];
 		Function * PMCAtomicThreadFence;
 #endif
-		Function * MemmoveFn, * MemcpyFn, * MemsetFn, *CacheFn, *FenceFn;
-		// Function * CDSCtorFunction;
+		Function * MemmoveFn, * MemcpyFn, * MemsetFn;
+		Function *CLFlushFn, *CLFlushOptFn, *CLWBFn;
+		Function *SFenceFn, *MFenceFn, *LFenceFn;
 #ifdef ENABLEATOMIC
 		std::vector<StringRef> AtomicFuncNames;
 #endif
@@ -231,6 +233,31 @@ namespace {
 StringRef PMCPass::getPassName() const {
 	return "PMCPass";
 }
+
+Function * PMCPass::whichNVMFunction(Instruction *I){
+	if(CallInst* callInst = dyn_cast<CallInst>(I)) {
+		if(callInst->isInlineAsm()){
+			InlineAsm *asmInline = dyn_cast<InlineAsm>(callInst->getCalledOperand());
+			StringRef asmStr = asmInline->getAsmString();
+			if(asmStr.contains("clflush")){
+				return CLFlushFn;
+			} else if (asmStr.contains("clflushopt")){
+				return CLFlushOptFn;
+			} else if (asmStr.contains("xsaveopt") ){
+				return CLWBFn;
+			} else if (asmStr.contains("mfence")) {
+				return MFenceFn;
+			} else if (asmStr.contains("sfence")) {
+				return SFenceFn;
+			} else if (asmStr.contains("lfence")) {
+				return LFenceFn;
+			}
+
+		}
+	}
+	return NULL;
+}
+
 
 NVMOP PMCPass::whichNVMoperation(Instruction *I){
 	if(CallInst* callInst = dyn_cast<CallInst>(I)) {
@@ -267,14 +294,6 @@ void PMCPass::initializeCallbacks(Module &M) {
 	Int64PtrTy = Type::getInt64PtrTy(Ctx);
 
 	VoidTy = Type::getVoidTy(Ctx);
-/*
-	PMCFuncEntry = checkPMCPassInterfaceFunction(
-						M.getOrInsertFunction("pmc_func_entry", 
-						Attr, VoidTy, Int8PtrTy).getCallee());
-	PMCFuncExit = checkPMCPassInterfaceFunction(
-						M.getOrInsertFunction("pmc_func_exit", 
-						Attr, VoidTy, Int8PtrTy).getCallee());
-*/
 	// Get the function to call from our untime library.
 	for (unsigned i = 0; i < kNumberOfAccessSizes; i++) {
 		const unsigned ByteSize = 1U << i;
@@ -286,8 +305,6 @@ void PMCPass::initializeCallbacks(Module &M) {
 		Type *Ty = Type::getIntNTy(Ctx, BitSize);
 		Type *PtrTy = Ty->getPointerTo();
 
-		// uint8_t cds_atomic_load8 (void * obj, int atomic_index)
-		// void cds_atomic_store8 (void * obj, int atomic_index, uint8_t val)
 		SmallString<32> LoadName("pmc_load" + BitSizeStr);
 		SmallString<32> StoreName("pmc_store" + BitSizeStr);
 		
@@ -372,8 +389,12 @@ void PMCPass::initializeCallbacks(Module &M) {
 	MemsetFn = checkPMCPassInterfaceFunction(
 					M.getOrInsertFunction("memset", Attr, Int8PtrTy, Int8PtrTy,
 					Int32Ty, IntPtrTy).getCallee());
-	CacheFn  = checkPMCPassInterfaceFunction(M.getOrInsertFunction("pmc_clwb", Attr, VoidTy, Int8PtrTy).getCallee());
-	FenceFn  = checkPMCPassInterfaceFunction(M.getOrInsertFunction("pmc_mfence", Attr, VoidTy).getCallee());
+	CLWBFn  = checkPMCPassInterfaceFunction(M.getOrInsertFunction("pmc_clwb", Attr, VoidTy, Int8PtrTy).getCallee());
+	CLFlushFn  = checkPMCPassInterfaceFunction(M.getOrInsertFunction("pmc_clflush", Attr, VoidTy, Int8PtrTy).getCallee());
+	CLFlushOptFn  = checkPMCPassInterfaceFunction(M.getOrInsertFunction("pmc_clflushopt", Attr, VoidTy, Int8PtrTy).getCallee());
+	MFenceFn  = checkPMCPassInterfaceFunction(M.getOrInsertFunction("pmc_mfence", Attr, VoidTy).getCallee());
+	SFenceFn  = checkPMCPassInterfaceFunction(M.getOrInsertFunction("pmc_sfence", Attr, VoidTy).getCallee());
+	LFenceFn  = checkPMCPassInterfaceFunction(M.getOrInsertFunction("pmc_lfence", Attr, VoidTy).getCallee());
 }
 
 bool PMCPass::doInitialization(Module &M) {
@@ -405,12 +426,12 @@ bool PMCPass::doInitialization(Module &M) {
 	
 	CacheOperationsNames =
 	{
-		"clflush", "xsaveopt", "mfence"
+		"clflush", "xsaveopt", "clflushopt"
 	};
 
 	FenceOperationsNames = 
 	{
-		"mfence"
+		"mfence", "sfence", "lfence"
 	};
 	return true;
 }
@@ -566,8 +587,6 @@ bool PMCPass::runOnFunction(Function &F) {
 	SmallVector<Instruction*, 8> MemIntrinCalls;
 
 	bool Res = false;
-	bool HasAtomic = false;
-	bool HasVolatile = false;
 	const DataLayout &DL = F.getParent()->getDataLayout();
 
 	for (auto &BB : F) {
@@ -575,7 +594,6 @@ bool PMCPass::runOnFunction(Function &F) {
 #ifdef ENABLEATOMIC
 			if ( (&Inst)->isAtomic() ) {
 				AtomicAccesses.push_back(&Inst);
-				HasAtomic = true;
 
 				if (shouldInstrumentBeforeAtomics(&Inst)) {
 					chooseInstructionsToInstrument(LocalLoadsAndStores, AllLoadsAndStores,
@@ -583,7 +601,6 @@ bool PMCPass::runOnFunction(Function &F) {
 				}
 			} else if (isAtomicCall(&Inst) ) {
 				AtomicAccesses.push_back(&Inst);
-				HasAtomic = true;
 				chooseInstructionsToInstrument(LocalLoadsAndStores, AllLoadsAndStores,
 					DL);
 			} else 
@@ -597,7 +614,6 @@ bool PMCPass::runOnFunction(Function &F) {
 #ifdef ENABLEATOMIC
 					VolatileLoadsAndStores.push_back(&Inst);
 #endif
-					HasVolatile = true;
 				} else
 					LocalLoadsAndStores.push_back(&Inst);
 			} else if (isa<CallInst>(Inst) || isa<InvokeInst>(Inst)) {
@@ -641,56 +657,34 @@ bool PMCPass::runOnFunction(Function &F) {
 	}
 
 	for (auto Inst : CacheOperations) {
-		assert(instrumentCacheWriteBack(Inst, DL));
+		assert(instrumentCacheOp(Inst, DL));
 	}
 
 	for (auto Inst : FenceOperations) {
-		instrumentFence(Inst, DL);
+		instrumentFenceOp(Inst, DL);
 	}
 	
-	// Only instrument functions that contain atomics or volatiles
-	/*
-	if (Res && ( HasAtomic || HasVolatile) ) {
-		IRBuilder<> IRB(F.getEntryBlock().getFirstNonPHI());
-		
-		//Value *ReturnAddress = IRB.CreateCall(
-		//	Intrinsic::getDeclaration(F.getParent(), Intrinsic::returnaddress),
-		//	IRB.getInt32(0));
-		
-
-		Value * FuncName = IRB.CreateGlobalStringPtr(F.getName());
-		IRB.CreateCall(PMCFuncEntry, FuncName);
-
-		EscapeEnumerator EE(F, "pmc_cleanup", true);
-		while (IRBuilder<> *AtExit = EE.Next()) {
-		  AtExit->CreateCall(PMCFuncExit, FuncName);
-		}
-
-		Res = true;
-	}
-	*/
 	return false;
 }
 
-bool PMCPass::instrumentCacheWriteBack( Instruction *I, const DataLayout &DL){
+bool PMCPass::instrumentCacheOp( Instruction *I, const DataLayout &DL){
+	errs() << "Instrumenting CacheOp: " << *I << "\n";
 	IRBuilder<> IRB(I);
 	assert(isa<CallInst>(I));
 	CallInst * CI = dyn_cast<CallInst>(I);
         std::vector<Value *> parameters;
-
         User::op_iterator begin = CI->arg_begin();
 	User::op_iterator end = CI->arg_end();
+	Function *CacheFn = whichNVMFunction(I);
         for (User::op_iterator it = begin; it != end; ++it) {
                 Value *param = *it;
-		errs() << *param << "\n";
                 parameters.push_back(param);
         }
+
 	if(parameters.size() != 2){
 		return false;
 	}
 	Value *Addr = parameters[0];
-
-
 	if(Addr->isSwiftError()){
 		return false;
 	}
@@ -706,8 +700,10 @@ bool PMCPass::instrumentCacheWriteBack( Instruction *I, const DataLayout &DL){
 	return true;
 }
 
-void PMCPass::instrumentFence(Instruction *I, const DataLayout &DL){
+void PMCPass::instrumentFenceOp(Instruction *I, const DataLayout &DL){
+	errs() << "Intrumenting Cache Fence: " << *I << "\n";
 	IRBuilder<> IRB(I);
+	Function *FenceFn = whichNVMFunction(I);
 	IRB.CreateCall(FenceFn);
 }
 
@@ -926,7 +922,7 @@ bool PMCPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 
 		CallInst *funcInst = CallInst::Create(PMCAtomicThreadFence, Args);
 		ReplaceInstWithInst(FI, funcInst);
-		// errs() << "Thread Fences replaced\n";
+		//errs() << "Thread Fences replaced\n";
 	}
 	return true;
 }
