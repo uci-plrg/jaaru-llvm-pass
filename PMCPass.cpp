@@ -50,7 +50,7 @@ using namespace llvm;
 #define DEBUG_TYPE "PMC"
 #include <llvm/IR/DebugLoc.h>
 
-#define ENABLEATOMIC
+//#define ENABLEATOMIC
 
 enum NVMOP {
 	NVM_CLWB,
@@ -709,6 +709,7 @@ void PMCPass::instrumentFenceOp(Instruction *I, const DataLayout &DL){
 
 
 bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
+	errs() << "Instrumenting load/store: " << *I << "\n";
 	IRBuilder<> IRB(I);
 	bool IsWrite = isa<StoreInst>(*I);
 	Value *Addr = IsWrite
@@ -776,6 +777,7 @@ bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 
 #ifdef ENABLEATOMIC
 bool PMCPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
+	errs() << "Intrumenting Volatile: " << *I << "\n";
 	IRBuilder<> IRB(I);
 	Value *position = getPosition(I, IRB);
 
@@ -809,6 +811,7 @@ bool PMCPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
 #endif
 
 bool PMCPass::instrumentMemIntrinsic(Instruction *I) {
+	errs() << "Intrumenting Memory: " << *I << "\n";
 	IRBuilder<> IRB(I);
 	if (MemSetInst *M = dyn_cast<MemSetInst>(I)) {
 		IRB.CreateCall(
@@ -831,6 +834,7 @@ bool PMCPass::instrumentMemIntrinsic(Instruction *I) {
 
 #ifdef ENABLEATOMIC
 bool PMCPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
+	errs() << "Intrumenting Atomic: " << *I << "\n";
 	IRBuilder<> IRB(I);
 
 	if (auto *CI = dyn_cast<CallInst>(I)) {
@@ -954,6 +958,7 @@ bool PMCPass::isAtomicCall(Instruction *I) {
 }
 
 bool PMCPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
+	errs() << "Intrumenting Atomic Call: " << *I << "\n";
 	IRBuilder<> IRB(CI);
 	Function *fun = CI->getCalledFunction();
 	StringRef funName = fun->getName();
