@@ -50,7 +50,7 @@ using namespace llvm;
 #define DEBUG_TYPE "PMC"
 #include <llvm/IR/DebugLoc.h>
 
-//#define ENABLEATOMIC
+#define ENABLEATOMIC
 
 enum NVMOP {
 	NVM_CLWB,
@@ -696,7 +696,10 @@ bool PMCPass::instrumentCacheOp( Instruction *I, const DataLayout &DL){
 	if ( ArgType != Int8PtrTy ) {
                 return false;
         }
-	IRB.CreateCall(CacheFn, IRB.CreatePointerCast(Addr, Addr->getType()));
+	//IRB.CreateCall(CacheFn, IRB.CreatePointerCast(Addr, Addr->getType()));
+	Value *args[] = {Addr};
+	Instruction* funcInst = CallInst::Create(CacheFn, args);
+	ReplaceInstWithInst(I, funcInst);
 	return true;
 }
 
@@ -958,7 +961,7 @@ bool PMCPass::isAtomicCall(Instruction *I) {
 }
 
 bool PMCPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
-	errs() << "Intrumenting Atomic Call: " << *I << "\n";
+	errs() << "Intrumenting Atomic Call: " << *CI << "\n";
 	IRBuilder<> IRB(CI);
 	Function *fun = CI->getCalledFunction();
 	StringRef funName = fun->getName();
