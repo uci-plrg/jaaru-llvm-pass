@@ -318,7 +318,7 @@ void PMCPass::initializeCallbacks(Module &M) {
 		PMCLoad[i]  = checkPMCPassInterfaceFunction(
 							M.getOrInsertFunction(LoadName, Attr, VoidTy, PtrTy).getCallee());
 		PMCStore[i] = checkPMCPassInterfaceFunction(
-							M.getOrInsertFunction(StoreName, Attr, VoidTy, PtrTy).getCallee());
+							M.getOrInsertFunction(StoreName, Attr, VoidTy, PtrTy, Ty).getCallee());
 		
 #ifdef ENABLEATOMIC		
 		PMCVolatileLoad[i]  = checkPMCPassInterfaceFunction(
@@ -771,10 +771,20 @@ bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 		// if other types of load or stores are passed in
 		return false;	
 	}
+	Addr = IRB.CreatePointerCast(Addr, Addr->getType());
+	if (StoreInst * SI = dyn_cast<StoreInst>(I)) {
+		Value *val = SI->getValueOperand();
+		Value *args[] = {Addr, val};
+		Instruction *funcInst = CallInst::Create(OnAccessFunc, args);
+		ReplaceInstWithInst(SI, funcInst);
+		NumInstrumentedWrites++;
+	} else if (!IsWrite){
+		IRB.CreateCall(OnAccessFunc, Addr);
+		NumInstrumentedReads++;
+	} else {
+		return false;
+	}
 
-	IRB.CreateCall(OnAccessFunc, IRB.CreatePointerCast(Addr, Addr->getType()));
-	if (IsWrite) NumInstrumentedWrites++;
-	else         NumInstrumentedReads++;
 	return true;
 }
 
