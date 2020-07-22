@@ -773,12 +773,14 @@ bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 	}
 	Addr = IRB.CreatePointerCast(Addr, Addr->getType());
 	if (StoreInst * SI = dyn_cast<StoreInst>(I)) {
+		errs() << "To be more specific: Instrumenting store: " << *I << "\n";
 		Value *val = SI->getValueOperand();
 		Value *args[] = {Addr, val};
 		Instruction *funcInst = CallInst::Create(OnAccessFunc, args);
 		ReplaceInstWithInst(SI, funcInst);
 		NumInstrumentedWrites++;
 	} else if (!IsWrite){
+		errs() << "To be more specific: Instrumenting load: " << *I << "\n";
 		IRB.CreateCall(OnAccessFunc, Addr);
 		NumInstrumentedReads++;
 	} else {
@@ -792,7 +794,7 @@ bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 bool PMCPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
 	errs() << "Intrumenting Volatile: " << *I << "\n";
 	IRBuilder<> IRB(I);
-	Value *position = getPosition(I, IRB);
+	Value *position = getPosition(I, IRB, true);
 
 	if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
 		assert( LI->isVolatile() );
@@ -800,8 +802,12 @@ bool PMCPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
 		int Idx=getMemoryAccessFuncIndex(Addr, DL);
 		if (Idx < 0)
 			return false;
+		const unsigned ByteSize = 1U << Idx;
+                const unsigned BitSize = ByteSize * 8;
+                Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
+                Type *PtrTy = Ty->getPointerTo();
 
-		Value *args[] = {Addr, position};
+		Value *args[] = {IRB.CreatePointerCast(Addr, PtrTy), position};
 		Instruction* funcInst = CallInst::Create(PMCVolatileLoad[Idx], args);
 		ReplaceInstWithInst(LI, funcInst);
 	} else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
@@ -810,9 +816,13 @@ bool PMCPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
 		int Idx=getMemoryAccessFuncIndex(Addr, DL);
 		if (Idx < 0)
 			return false;
+		const unsigned ByteSize = 1U << Idx;
+                const unsigned BitSize = ByteSize * 8;
+                Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
+                Type *PtrTy = Ty->getPointerTo();
 
 		Value *val = SI->getValueOperand();
-		Value *args[] = {Addr, val, position};
+		Value *args[] = {IRB.CreatePointerCast(Addr, PtrTy), val, position};
 		Instruction* funcInst = CallInst::Create(PMCVolatileStore[Idx], args);
 		ReplaceInstWithInst(SI, funcInst);
 	} else {
@@ -854,7 +864,7 @@ bool PMCPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 		return instrumentAtomicCall(CI, DL);
 	}
 
-	Value *position = getPosition(I, IRB);
+	Value *position = getPosition(I, IRB, true);
 
 	if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
 		Value *Addr = LI->getPointerOperand();
@@ -985,7 +995,7 @@ bool PMCPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 	}
 
 	// obtain source line number of the CallInst
-	Value *position = getPosition(CI, IRB);
+	Value *position = getPosition(CI, IRB, true);
 
 	// the pointer to the address is always the first argument
 	Value *OrigPtr = parameters[0];
