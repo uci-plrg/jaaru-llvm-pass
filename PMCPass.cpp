@@ -168,8 +168,7 @@ static Function * checkPMCPassInterfaceFunction(Value *FuncOrBitcast) {
 	raw_string_ostream Stream(Err);
 	Stream << "PMCPass interface function redefined: " << *FuncOrBitcast;
 	report_fatal_error(Err);
-}
-
+} 
 
 namespace {
 
@@ -181,6 +180,7 @@ namespace {
 		static char ID;
 
 	private:
+		Type *getProperType(IRBuilder<> & IRB, int idx);
 		void instrumentFenceOp(Instruction *I, const DataLayout &DL);
 		bool instrumentCacheOp(Instruction *I, const DataLayout &DL);
 		void initializeCallbacks(Module &M);
@@ -790,45 +790,52 @@ bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 	return true;
 }
 
+Type *PMCPass::getProperType(IRBuilder<> & IRB, int idx){
+	const unsigned byteSize = 1U << idx;
+	const unsigned bitSize = byteSize * 8;
+        Type *Ty = Type::getIntNTy(IRB.getContext(), bitSize);
+	return Ty->getPointerTo();
+}
+
 #ifdef ENABLEATOMIC
 bool PMCPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
-	errs() << "Intrumenting Volatile: " << *I << "\n";
+	errs() << "Intrumenting Volatile: " << *I << "\tNumber of operands: "<< I->getNumOperands() <<"\n";
 	IRBuilder<> IRB(I);
 	Value *position = getPosition(I, IRB, true);
-
+	bool IsWrite = isa<StoreInst>(*I);
+        Value *addr = IsWrite
+                ? cast<StoreInst>(I)->getPointerOperand()
+                : cast<LoadInst>(I)->getPointerOperand();
+	int idx=getMemoryAccessFuncIndex(addr, DL);
+	if (idx < 0)
+		return false;
+	const unsigned byteSize = 1U << idx;
+	const unsigned bitSize = byteSize * 8;
+        Type *Ty = Type::getIntNTy(IRB.getContext(), bitSize);
+	Type *ptrTy = Ty->getPointerTo();
 	if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
 		assert( LI->isVolatile() );
-		Value *Addr = LI->getPointerOperand();
-		int Idx=getMemoryAccessFuncIndex(Addr, DL);
-		if (Idx < 0)
-			return false;
-		const unsigned ByteSize = 1U << Idx;
-                const unsigned BitSize = ByteSize * 8;
-                Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-                Type *PtrTy = Ty->getPointerTo();
-
-		Value *args[] = {IRB.CreatePointerCast(Addr, PtrTy), position};
-		Instruction* funcInst = CallInst::Create(PMCVolatileLoad[Idx], args);
-		ReplaceInstWithInst(LI, funcInst);
+		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy), position};
+		Type *orgTy = cast<PointerType>(addr->getType())->getElementType();
+		Value *funcInst = IRB.CreateCall(PMCVolatileLoad[idx], args);
+		Value *cast = IRB.CreateBitOrPointerCast(funcInst, orgTy);
+		I->replaceAllUsesWith(cast);
 	} else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
 		assert( SI->isVolatile() );
-		Value *Addr = SI->getPointerOperand();
-		int Idx=getMemoryAccessFuncIndex(Addr, DL);
-		if (Idx < 0)
-			return false;
-		const unsigned ByteSize = 1U << Idx;
-                const unsigned BitSize = ByteSize * 8;
-                Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-                Type *PtrTy = Ty->getPointerTo();
-
 		Value *val = SI->getValueOperand();
-		Value *args[] = {IRB.CreatePointerCast(Addr, PtrTy), val, position};
-		Instruction* funcInst = CallInst::Create(PMCVolatileStore[Idx], args);
-		ReplaceInstWithInst(SI, funcInst);
+		//assert(PMCVolatileStore[idx]->arg_size()> 2);
+		//Type *valType = PMCVolatileStore[idx]->getArg(1)->getType();
+		//if( val->getType() != valType) {
+                //        errs() << "PMC Warning: Value Type= " << *val->getType() << "\t casting to ==>" << *valType << '\n';
+		//	val = CastInst::CreatePointerCast(val, valType);
+		//}
+		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy),
+				IRB.CreateBitOrPointerCast(val, Ty), position};
+		CallInst *C = CallInst::Create(PMCVolatileStore[idx], args);
+		ReplaceInstWithInst(I, C);
 	} else {
 		return false;
 	}
-
 	return true;
 }
 #endif
