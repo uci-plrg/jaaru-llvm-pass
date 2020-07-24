@@ -180,7 +180,6 @@ namespace {
 		static char ID;
 
 	private:
-		Type *getProperType(IRBuilder<> & IRB, int idx);
 		void instrumentFenceOp(Instruction *I, const DataLayout &DL);
 		bool instrumentCacheOp(Instruction *I, const DataLayout &DL);
 		void initializeCallbacks(Module &M);
@@ -316,7 +315,7 @@ void PMCPass::initializeCallbacks(Module &M) {
 		SmallString<32> AtomicStoreName("pmc_atomic_store" + BitSizeStr);
 #endif
 		PMCLoad[i]  = checkPMCPassInterfaceFunction(
-							M.getOrInsertFunction(LoadName, Attr, VoidTy, PtrTy).getCallee());
+							M.getOrInsertFunction(LoadName, Attr, Ty, PtrTy).getCallee());
 		PMCStore[i] = checkPMCPassInterfaceFunction(
 							M.getOrInsertFunction(StoreName, Attr, VoidTy, PtrTy, Ty).getCallee());
 		
@@ -586,7 +585,6 @@ bool PMCPass::runOnFunction(Function &F) {
 #endif
 	SmallVector<Instruction*, 8> MemIntrinCalls;
 
-	bool Res = false;
 	const DataLayout &DL = F.getParent()->getDataLayout();
 
 	for (auto &BB : F) {
@@ -640,20 +638,20 @@ bool PMCPass::runOnFunction(Function &F) {
 	}
 
 	for (auto Inst : AllLoadsAndStores) {
-		Res |= instrumentLoadOrStore(Inst, DL);
+		instrumentLoadOrStore(Inst, DL);
 	}
 
 #ifdef ENABLEATOMIC 	
 	for (auto Inst : VolatileLoadsAndStores) {
-		Res |= instrumentVolatile(Inst, DL);
+		assert(instrumentVolatile(Inst, DL));
 	}
 	for (auto Inst : AtomicAccesses) {
-		Res |= instrumentAtomic(Inst, DL);
+		assert(instrumentAtomic(Inst, DL));
 	}
 #endif
 	
 	for (auto Inst : MemIntrinCalls) {
-		Res |= instrumentMemIntrinsic(Inst);
+		assert(instrumentMemIntrinsic(Inst));
 	}
 
 	for (auto Inst : CacheOperations) {
@@ -715,18 +713,18 @@ bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 	errs() << "Instrumenting load/store: " << *I << "\n";
 	IRBuilder<> IRB(I);
 	bool IsWrite = isa<StoreInst>(*I);
-	Value *Addr = IsWrite
+	Value *addr = IsWrite
 		? cast<StoreInst>(I)->getPointerOperand()
 		: cast<LoadInst>(I)->getPointerOperand();
 
 	// swifterror memory addresses are mem2reg promoted by instruction selection.
 	// As such they cannot have regular uses like an instrumentation function and
 	// it makes no sense to track them as memory.
-	if (Addr->isSwiftError())
+	if (addr->isSwiftError())
 		return false;
 
-	int Idx = getMemoryAccessFuncIndex(Addr, DL);
-	if (Idx < 0)
+	int idx = getMemoryAccessFuncIndex(addr, DL);
+	if (idx < 0)
 		return false;
 
 	if (IsWrite && isVtableAccess(I)) {
@@ -760,41 +758,36 @@ bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 	}
 
 	// TODO: unaligned reads and writes
+	
+	Value *OnAccessFunc = IsWrite ? PMCStore[idx] : PMCLoad[idx];
+	const unsigned byteSize = 1U << idx;
+        const unsigned bitSize = byteSize * 8;
+        Type *Ty = Type::getIntNTy(IRB.getContext(), bitSize);
+        Type *ptrTy = Ty->getPointerTo();
 
-	Value *OnAccessFunc = nullptr;
-	OnAccessFunc = IsWrite ? PMCStore[Idx] : PMCLoad[Idx];
-
-	Type *ArgType = IRB.CreatePointerCast(Addr, Addr->getType())->getType();
-
-	if ( ArgType != Int8PtrTy && ArgType != Int16PtrTy && 
-			ArgType != Int32PtrTy && ArgType != Int64PtrTy ) {
-		// if other types of load or stores are passed in
-		return false;	
-	}
-	Addr = IRB.CreatePointerCast(Addr, Addr->getType());
 	if (StoreInst * SI = dyn_cast<StoreInst>(I)) {
 		errs() << "To be more specific: Instrumenting store: " << *I << "\n";
 		Value *val = SI->getValueOperand();
-		Value *args[] = {Addr, val};
-		Instruction *funcInst = CallInst::Create(OnAccessFunc, args);
-		ReplaceInstWithInst(SI, funcInst);
+		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy),
+                                IRB.CreateBitOrPointerCast(val, Ty)};
+                CallInst *C = CallInst::Create(OnAccessFunc, args);
+                ReplaceInstWithInst(I, C);
+
 		NumInstrumentedWrites++;
 	} else if (!IsWrite){
 		errs() << "To be more specific: Instrumenting load: " << *I << "\n";
-		IRB.CreateCall(OnAccessFunc, Addr);
+		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy)};
+                Type *orgTy = cast<PointerType>(addr->getType())->getElementType();
+                Value *funcInst = IRB.CreateCall(OnAccessFunc, args);
+                Value *cast = IRB.CreateBitOrPointerCast(funcInst, orgTy);
+                I->replaceAllUsesWith(cast);
+		
 		NumInstrumentedReads++;
 	} else {
 		return false;
 	}
 
 	return true;
-}
-
-Type *PMCPass::getProperType(IRBuilder<> & IRB, int idx){
-	const unsigned byteSize = 1U << idx;
-	const unsigned bitSize = byteSize * 8;
-        Type *Ty = Type::getIntNTy(IRB.getContext(), bitSize);
-	return Ty->getPointerTo();
 }
 
 #ifdef ENABLEATOMIC
@@ -858,7 +851,7 @@ bool PMCPass::instrumentMemIntrinsic(Instruction *I) {
 			 IRB.CreateIntCast(M->getArgOperand(2), IntPtrTy, false)});
 		I->eraseFromParent();
 	}
-	return false;
+	return true;
 }
 
 
