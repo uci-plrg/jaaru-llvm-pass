@@ -315,9 +315,9 @@ void PMCPass::initializeCallbacks(Module &M) {
 		SmallString<32> AtomicStoreName("pmc_atomic_store" + BitSizeStr);
 #endif
 		PMCLoad[i]  = checkPMCPassInterfaceFunction(
-							M.getOrInsertFunction(LoadName, Attr, Ty, PtrTy).getCallee());
+							M.getOrInsertFunction(LoadName, Attr, Ty, PtrTy, Int8PtrTy).getCallee());
 		PMCStore[i] = checkPMCPassInterfaceFunction(
-							M.getOrInsertFunction(StoreName, Attr, VoidTy, PtrTy, Ty).getCallee());
+							M.getOrInsertFunction(StoreName, Attr, VoidTy, PtrTy, Ty, Int8PtrTy).getCallee());
 		
 #ifdef ENABLEATOMIC		
 		PMCVolatileLoad[i]  = checkPMCPassInterfaceFunction(
@@ -712,6 +712,7 @@ void PMCPass::instrumentFenceOp(Instruction *I, const DataLayout &DL){
 bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 	errs() << "Instrumenting load/store: " << *I << "\n";
 	IRBuilder<> IRB(I);
+	Value *position = getPosition(I, IRB, true);
 	bool IsWrite = isa<StoreInst>(*I);
 	Value *addr = IsWrite
 		? cast<StoreInst>(I)->getPointerOperand()
@@ -769,14 +770,14 @@ bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 		errs() << "To be more specific: Instrumenting store: " << *I << "\n";
 		Value *val = SI->getValueOperand();
 		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy),
-                                IRB.CreateBitOrPointerCast(val, Ty)};
+                                IRB.CreateBitOrPointerCast(val, Ty), position};
                 CallInst *C = CallInst::Create(OnAccessFunc, args);
                 ReplaceInstWithInst(I, C);
 
 		NumInstrumentedWrites++;
 	} else if (!IsWrite){
 		errs() << "To be more specific: Instrumenting load: " << *I << "\n";
-		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy)};
+		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy), position};
                 Type *orgTy = cast<PointerType>(addr->getType())->getElementType();
                 Value *funcInst = IRB.CreateCall(OnAccessFunc, args);
                 Value *cast = IRB.CreateBitOrPointerCast(funcInst, orgTy);
