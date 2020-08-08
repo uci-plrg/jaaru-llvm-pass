@@ -525,6 +525,7 @@ void PMCPass::chooseInstructionsToInstrument(
 	SmallVectorImpl<Instruction *> &Local, SmallVectorImpl<Instruction *> &All,
 	const DataLayout &DL) {
 	SmallPtrSet<Value*, 8> WriteTargets;
+	SmallVector<Instruction*, 8> results;
 	// Iterate from the end.
 	for (Instruction *I : reverse(Local)) {
 		if (StoreInst *Store = dyn_cast<StoreInst>(I)) {
@@ -535,13 +536,14 @@ void PMCPass::chooseInstructionsToInstrument(
 		} else {
 			LoadInst *Load = cast<LoadInst>(I);
 			Value *Addr = Load->getPointerOperand();
-			if (!shouldInstrumentReadWriteFromAddress(I->getModule(), Addr))
-				continue;
-			if (WriteTargets.count(Addr)) {
-				// We will write to this temp, so no reason to analyze the read.
-				NumOmittedReadsBeforeWrite++;
+			if (!shouldInstrumentReadWriteFromAddress(I->getModule(), Addr)){
 				continue;
 			}
+			//if (WriteTargets.count(Addr)) {
+				// We will write to this temp, so no reason to analyze the read.
+			//	NumOmittedReadsBeforeWrite++;
+			//	continue;
+			//}
 			if (addrPointsToConstantData(Addr)) {
 				// Addr points to some constant data -- it can not race with any writes.
 				continue;
@@ -555,9 +557,13 @@ void PMCPass::chooseInstructionsToInstrument(
 			// The variable is addressable but not captured, so it cannot be
 			// referenced from a different thread and participate in a data race
 			// (see llvm/Analysis/CaptureTracking.h for details).
+
 			NumOmittedNonCaptured++;
 			continue;
 		}
+		results.push_back(I);
+	}
+	for( Instruction *I: reverse(results) ){
 		All.push_back(I);
 	}
 	Local.clear();
