@@ -530,13 +530,16 @@ void PMCPass::chooseInstructionsToInstrument(
 	for (Instruction *I : reverse(Local)) {
 		if (StoreInst *Store = dyn_cast<StoreInst>(I)) {
 			Value *Addr = Store->getPointerOperand();
-			if (!shouldInstrumentReadWriteFromAddress(I->getModule(), Addr))
+			if (!shouldInstrumentReadWriteFromAddress(I->getModule(), Addr)){
+				errs() << "Store: Should...." << '\n';
 				continue;
+			}
 			WriteTargets.insert(Addr);
 		} else {
 			LoadInst *Load = cast<LoadInst>(I);
 			Value *Addr = Load->getPointerOperand();
 			if (!shouldInstrumentReadWriteFromAddress(I->getModule(), Addr)){
+				errs() << "Load: Should...." << '\n';
 				continue;
 			}
 			//if (WriteTargets.count(Addr)) {
@@ -545,6 +548,7 @@ void PMCPass::chooseInstructionsToInstrument(
 			//	continue;
 			//}
 			if (addrPointsToConstantData(Addr)) {
+				errs() << "Load: Constant ..." << '\n';
 				// Addr points to some constant data -- it can not race with any writes.
 				continue;
 			}
@@ -557,7 +561,8 @@ void PMCPass::chooseInstructionsToInstrument(
 			// The variable is addressable but not captured, so it cannot be
 			// referenced from a different thread and participate in a data race
 			// (see llvm/Analysis/CaptureTracking.h for details).
-
+			
+			//errs() << "Captured ..." << *Addr << '\n';
 			NumOmittedNonCaptured++;
 			continue;
 		}
@@ -716,7 +721,6 @@ void PMCPass::instrumentFenceOp(Instruction *I, const DataLayout &DL){
 
 
 bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
-	errs() << "Instrumenting load/store: " << *I << "\n";
 	IRBuilder<> IRB(I);
 	Value *position = getPosition(I, IRB, true);
 	bool IsWrite = isa<StoreInst>(*I);
@@ -773,7 +777,7 @@ bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
         Type *ptrTy = Ty->getPointerTo();
 
 	if (StoreInst * SI = dyn_cast<StoreInst>(I)) {
-		errs() << "To be more specific: Instrumenting store: " << *I << "\n";
+		errs() << "Instrumenting non-atomic store: " << *I << "\n";
 		Value *val = SI->getValueOperand();
 		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy),
                                 IRB.CreateBitOrPointerCast(val, Ty), position};
@@ -782,7 +786,7 @@ bool PMCPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 
 		NumInstrumentedWrites++;
 	} else if (!IsWrite){
-		errs() << "To be more specific: Instrumenting load: " << *I << "\n";
+		errs() << "Instrumenting non-atomic load: " << *I << "\n";
 		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy), position};
                 Type *orgTy = cast<PointerType>(addr->getType())->getElementType();
                 Value *funcInst = IRB.CreateCall(OnAccessFunc, args);
@@ -973,7 +977,7 @@ bool PMCPass::isAtomicCall(Instruction *I) {
 
 		// TODO: come up with better rules for function name checking
 		for (StringRef name : AtomicFuncNames) {
-			if ( funName.contains(name) ) 
+			if ( funName.startswith(name) ) 
 				return true;
 		}
 		
