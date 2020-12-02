@@ -654,19 +654,19 @@ bool PMCPass::runOnFunction(Function &F) {
 
 #ifdef ENABLEATOMIC 	
 	for (auto Inst : VolatileLoadsAndStores) {
-		assert(instrumentVolatile(Inst, DL));
+		instrumentVolatile(Inst, DL);
 	}
 	for (auto Inst : AtomicAccesses) {
-		assert(instrumentAtomic(Inst, DL));
+		instrumentAtomic(Inst, DL);
 	}
 #endif
 	
 	for (auto Inst : MemIntrinCalls) {
-		assert(instrumentMemIntrinsic(Inst));
+		instrumentMemIntrinsic(Inst);
 	}
 
 	for (auto Inst : CacheOperations) {
-		assert(instrumentCacheOp(Inst, DL));
+		instrumentCacheOp(Inst, DL);
 	}
 
 	for (auto Inst : FenceOperations) {
