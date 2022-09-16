@@ -238,10 +238,10 @@ Function * PMCPass::whichNVMFunction(Instruction *I){
 		if(callInst->isInlineAsm()){
 			InlineAsm *asmInline = dyn_cast<InlineAsm>(callInst->getCalledOperand());
 			StringRef asmStr = asmInline->getAsmString();
-			if(asmStr.contains("clflush")){
-				return CLFlushFn;
-			} else if (asmStr.contains("clflushopt")){
+			if (asmStr.contains("clflushopt")) {
 				return CLFlushOptFn;
+			} else if (asmStr.contains("clflush")) {
+				return CLFlushFn;
 			} else if (asmStr.contains("xsaveopt") ){
 				return CLWBFn;
 			} else if (asmStr.contains("mfence")) {
